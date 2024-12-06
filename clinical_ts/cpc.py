@@ -14,13 +14,14 @@ from .basic_conv1d import listify, bn_drop_lin
 # Cell
 class CPCEncoder(nn.Sequential):
     'CPC Encoder'
+    # input_channels = 12, strides = [1,1,1,1], kss = [1,1,1,1], features = [512, 512, 512, 512], bn = False
     def __init__(self, input_channels, strides=[5,4,2,2,2], kss=[10,8,4,4,4], features=[512,512,512,512],bn=False):
         assert(len(strides)==len(kss) and len(strides)==len(features))
         lst = []
         for i,(s,k,f) in enumerate(zip(strides,kss,features)):
             lst.append(_conv1d(input_channels if i==0 else features[i-1],f,kernel_size=k,stride=s,bn=bn))
         super().__init__(*lst)
-        self.downsampling_factor = np.prod(strides)
+        self.downsampling_factor = np.prod(strides)     # downsampling_factor=1
         self.output_dim = features[-1]
         # output: bs, output_dim, seq//downsampling_factor
     def encode(self, input):
@@ -35,23 +36,29 @@ class CPCEncoder(nn.Sequential):
 # Cell
 class CPCModel(nn.Module):
     "CPC model"
-    def __init__(self, input_channels, strides=[5,4,2,2,2], kss=[10,8,4,4,4], features=[512,512,512,512],bn_encoder=False, n_hidden=512,n_layers=2,mlp=False,lstm=True,bias_proj=False, num_classes=None, concat_pooling=True, ps_head=0.5,lin_ftrs_head=[512],bn_head=True,skip_encoder=False):
+
+    # input_channels = 12, strides = [1,1,1,1], kss = [1,1,1,1], features = [512, 512, 512, 512],
+    # n_hidden = 512, n_layers = 2, mlp = False, lstm = True, bias_proj = False, num_classes = None,
+    # skip_encoder = False, bn_encoder = False, lin_ftrs_head = [512], ps_head = 0.5, bn_head = True, concat_pooling=True
+    def __init__(self, input_channels, strides=[5,4,2,2,2], kss=[10,8,4,4,4], features=[512,512,512,512],
+                 bn_encoder=False, n_hidden=512,n_layers=2,mlp=False,lstm=True,bias_proj=False, num_classes=None,
+                 concat_pooling=True, ps_head=0.5,lin_ftrs_head=[512],bn_head=True,skip_encoder=False):
         super().__init__()
         assert(skip_encoder is False or num_classes is not None)#pretraining only with encoder
         self.encoder = CPCEncoder(input_channels,strides=strides,kss=kss,features=features,bn=bn_encoder) if skip_encoder is False else None
-        self.encoder_output_dim = self.encoder.output_dim if skip_encoder is False else None
-        self.encoder_downsampling_factor = self.encoder.downsampling_factor if skip_encoder is False else None
-        self.n_hidden = n_hidden
-        self.n_layers = n_layers
-        self.mlp = mlp
+        self.encoder_output_dim = self.encoder.output_dim if skip_encoder is False else None    # encoder_output_dim=512
+        self.encoder_downsampling_factor = self.encoder.downsampling_factor if skip_encoder is False else None  # encoder_downsampling_factor=1
+        self.n_hidden = n_hidden    # 512
+        self.n_layers = n_layers    # 2
+        self.mlp = mlp  # False
         
-        self.num_classes = num_classes
-        self.concat_pooling = concat_pooling
-        
+        self.num_classes = num_classes  # None
+        self.concat_pooling = concat_pooling    # True
+        # 输入是512维，输出512维， 2层的LSTM
         self.rnn = nn.LSTM(self.encoder_output_dim if skip_encoder is False else input_channels,n_hidden,num_layers=n_layers,batch_first=True) if lstm is True else nn.GRU(self.encoder.output_dim,n_hidden,num_layers=n_layers,batch_first=True)
         
         if(num_classes is None): #pretraining
-            if(mlp):# additional hidden layer as in simclr
+            if(mlp):# additional hidden layer as in simclr      # mlp=False
                 self.proj = nn.Sequential(nn.Linear(n_hidden, n_hidden),nn.ReLU(inplace=True),nn.Linear(n_hidden, self.encoder_output_dim,bias=bias_proj))
             else:
                 self.proj = nn.Linear(n_hidden, self.encoder_output_dim,bias=bias_proj)
@@ -61,14 +68,15 @@ class CPCModel(nn.Module):
             if(self.concat_pooling):
                 layers_head.append(AdaptiveConcatPoolRNN())
 
-            #classifier
+            #classifier     # concat_pooling = True
             nf = 3*n_hidden if concat_pooling else n_hidden
+            # lin_ftrs_head = [nf, 512, None]
             lin_ftrs_head = [nf, num_classes] if lin_ftrs_head is None else [nf] + lin_ftrs_head + [num_classes]
             ps_head = listify(ps_head)
             if len(ps_head)==1:
                 ps_head = [ps_head[0]/2] * (len(lin_ftrs_head)-2) + ps_head
-            actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs_head)-2) + [None]
-
+                # ps_head = [0.25, 0.5]
+            actns = [nn.ReLU(inplace=True)] * (len(lin_ftrs_head)-2) + [None]   # actns = [nn.ReLU, None]
             for ni,no,p,actn in zip(lin_ftrs_head[:-1],lin_ftrs_head[1:],ps_head,actns):
                 layers_head+=bn_drop_lin(ni,no,bn_head,p,actn)
             self.head=nn.Sequential(*layers_head)

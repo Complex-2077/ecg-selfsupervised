@@ -312,11 +312,11 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
         
         col_lbl = None: return dummy label 0 (e.g. for unsupervised pretraining)
         """
-        assert not((memmap_filename is not None) and (npy_data is not None))
+        assert not((memmap_filename is not None) and (npy_data is not None))    # 必须一个是None
         # require integer entries if using memmap or npy
         assert (memmap_filename is None and npy_data is None) or df.data.dtype==np.int64
 
-        self.timeseries_df_data = np.array(df["data"])
+        self.timeseries_df_data = np.array(df["data"])  # [0, 1, 2...]
         if(self.timeseries_df_data.dtype not in [np.int16, np.int32, np.int64]):
             assert(memmap_filename is None and npy_data is None) #only for filenames in mode files
             self.timeseries_df_data = np.array(df["data"].astype(str)).astype(np.string_)
@@ -325,7 +325,7 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
             self.timeseries_df_label = np.zeros(len(df))
         else: # use actual labels
             if(isinstance(df[col_lbl].iloc[0],list) or isinstance(df[col_lbl].iloc[0],np.ndarray)):#stack arrays/lists for proper batching
-                self.timeseries_df_label = np.stack(df[col_lbl])
+                self.timeseries_df_label = np.stack(df[col_lbl])    # (num_samples, nums_classes)
             else: # single integers/floats
                 self.timeseries_df_label = np.array(df[col_lbl])
                     
@@ -333,28 +333,29 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
                 assert(annotation and memmap_filename is None and npy_data is None)#only for filenames in mode files
                 self.timeseries_df_label = np.array(df[col_lbl].apply(lambda x:str(x))).astype(np.string_)
         
-        self.output_size = output_size
-        self.data_folder = data_folder
+        self.output_size = output_size  # 250
+        self.data_folder = data_folder  # ../data/acs_database
         self.transforms = transforms
         if(isinstance(self.transforms,list) or isinstance(self.transforms,np.ndarray)):
             print("Warning: the use of list as arguments for transforms is dicouraged")
-        self.annotation = annotation
-        self.col_lbl = col_lbl
+        self.annotation = annotation    # False
+        self.col_lbl = col_lbl  # label
 
-        self.c = num_classes
+        self.c = num_classes    # 2
 
         self.mode="files"
 
-        if(memmap_filename is not None):
+        if(memmap_filename is not None):            # ./data/acs_database/memmap_meta.npz
             self.memmap_meta_filename = memmap_filename.parent/(memmap_filename.stem+"_meta.npz")
             self.mode="memmap"
             memmap_meta = np.load(self.memmap_meta_filename, allow_pickle=True)
             self.memmap_start = memmap_meta["start"]
             self.memmap_shape = memmap_meta["shape"]
             self.memmap_length = memmap_meta["length"]
-            self.memmap_file_idx = memmap_meta["file_idx"]
+            self.memmap_file_idx = memmap_meta["file_idx"]  # [0, 0, 0...]
             self.memmap_dtype = np.dtype(str(memmap_meta["dtype"]))
             self.memmap_filenames = np.array(memmap_meta["filenames"]).astype(np.string_)#save as byte to avoid issue with mp
+            # memmap_filenames = [Path('./data/acs_database/memmap.npy')]
             if(annotation):
                 memmap_meta_label = np.load(self.memmap_meta_filename.parent/("_".join(self.memmap_meta_filename.stem.split("_")[:-1])+"_label_meta.npz"), allow_pickle=True)
                 self.memmap_shape_label = memmap_meta_label["shape"]
@@ -370,8 +371,8 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
             if(annotation):
                 self.npy_data_label = np.load(npy_data.parent/(npy_data.stem+"_label.npy"), allow_pickle=True)
 
-        self.random_crop = random_crop
-        self.sample_items_per_record = sample_items_per_record
+        self.random_crop = random_crop  # True
+        self.sample_items_per_record = sample_items_per_record  # 1
 
         self.df_idx_mapping=[]
         self.start_idx_mapping=[]
@@ -391,7 +392,6 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
             else:
                 idx_start = list(range(start_idx,data_length,chunk_length if stride is None else stride))
                 idx_end = [min(l+chunk_length, data_length) for l in idx_start]
-
             #remove final chunk(s) if too short
             for i in range(len(idx_start)):
                 if(idx_end[i]-idx_start[i]< min_chunk_length):
@@ -464,9 +464,11 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
             else:
                 label = self.timeseries_df_label[df_idx] #input type has to be adjusted in the dataframe
         elif(self.mode=="memmap"): #from one memmap file
+            # timeseries_df_data = [0,1,2...]   # 可能不连续，因为做了切片
             memmap_idx = self.timeseries_df_data[df_idx] #grab the actual index (Note the df to create the ds might be a subset of the original df used to create the memmap)
-            memmap_file_idx = self.memmap_file_idx[memmap_idx]
+            memmap_file_idx = self.memmap_file_idx[memmap_idx]      # memmap_file_idx就是[0,0,0,...]
             idx_offset = self.memmap_start[memmap_idx]
+            # timeseries_df_data 就是文件名[0, 1, 2, ...]
 
             #wi = torch.utils.data.get_worker_info()
             #pid = 0 if wi is None else wi.id#os.getpid()
@@ -475,6 +477,7 @@ class TimeseriesDatasetCrops(torch.utils.data.Dataset):
             mem_file = np.memmap(self.memmap_meta_filename.parent/mem_filename, self.memmap_dtype, mode='r', shape=tuple(self.memmap_shape[memmap_file_idx]))
             data = np.copy(mem_file[idx_offset + start_idx_crop: idx_offset + end_idx_crop])
             del mem_file
+            assert self.annotation == False
             #print(mem_file[idx_offset + start_idx_crop: idx_offset + end_idx_crop])
             if(self.annotation):
                 mem_filename_label = str(self.memmap_filenames_label[memmap_file_idx],encoding='utf-8')

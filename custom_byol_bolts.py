@@ -368,12 +368,16 @@ def init_logger(config):
     return logging.getLogger(__name__)
 
 def pretrain_routine(args):
-    t_params = {"gaussian_scale": args.gaussian_scale, "rr_crop_ratio_range": args.rr_crop_ratio_range, "output_size": args.output_size, "warps": args.warps, "radius": args.radius,
-                "epsilon": args.epsilon, "magnitude_range": args.magnitude_range, "downsample_ratio": args.downsample_ratio, "to_crop_ratio_range": args.to_crop_ratio_range,
+    '''python custom_byol_bolts.py --batch_size 4096 --epochs 2000 --precision 16 --trafos RandomResizedCrop TimeOut
+    --datasets ./data/cinc ./data/zheng ./data/ribeiro --log_dir=experiment_logs'''
+    t_params = {"gaussian_scale": args.gaussian_scale, "rr_crop_ratio_range": args.rr_crop_ratio_range,
+                "output_size": args.output_size, "warps": args.warps, "radius": args.radius,
+                "epsilon": args.epsilon, "magnitude_range": args.magnitude_range,
+                "downsample_ratio": args.downsample_ratio, "to_crop_ratio_range": args.to_crop_ratio_range,
                 "bw_cmax":0.1, "em_cmax":0.5, "pl_cmax":0.2, "bs_cmax":1}
     transformations = args.trafos
     checkpoint_config = os.path.join("checkpoints", "bolts_config.yaml")
-    config_file = checkpoint_config if args.resume and os.path.isfile(
+    config_file = checkpoint_config if args.resume and os.path.isfile(      # config_file = 'bolts_config.yaml'
         checkpoint_config) else "bolts_config.yaml"
     config = yaml.load(open(config_file, "r"), Loader=yaml.FullLoader)
     args_dict = vars(args)
@@ -382,14 +386,15 @@ def pretrain_routine(args):
         ) and key in config.keys() and args_dict[key] is None) else args_dict[key]
     if args.target_folders is not None:
         config["dataset"]["target_folders"] = args.target_folders
+        # config["dataset"]["target_folders"] = ./data/cinc ./data/zheng ./data/ribeiro
     config["dataset"]["percentage"] = args.percentage if args.percentage is not None else config["dataset"]["percentage"]
-    config["dataset"]["filter_cinc"] = args.filter_cinc if args.filter_cinc is not None else config["dataset"]["filter_cinc"]
-    config["model"]["base_model"] = args.base_model if args.base_model is not None else config["model"]["base_model"]
-    config["model"]["widen"] = args.widen if args.widen is not None else config["model"]["widen"]
+    config["dataset"]["filter_cinc"] = args.filter_cinc if args.filter_cinc is not None else config["dataset"]["filter_cinc"] # filter-cinc is False
+    config["model"]["base_model"] = args.base_model if args.base_model is not None else config["model"]["base_model"] # base_model = resnet1d50
+    config["model"]["widen"] = args.widen if args.widen is not None else config["model"]["widen"]   # widen = 1.0
     if args.out_dim is not None:
         config["model"]["out_dim"] = args.out_dim
     init_logger(config)
-    dataset = SimCLRDataSetWrapper(
+    dataset = SimCLRDataSetWrapper(     # batch_size = 4096, transformations = RandomResizedCrop TimeOut
         config['batch_size'], **config['dataset'], transformations=transformations, t_params=t_params)
     for i, t in enumerate(dataset.transformations):
         logger.info(str(i) + ". Transformation: " +

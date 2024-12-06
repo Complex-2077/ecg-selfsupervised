@@ -2,6 +2,8 @@ __all__ = ['get_available_channels', 'channel_stoi_default', 'resample_data', 'g
            'filter_ptb_xl','prepare_data_cinc', 'prepare_data_zheng', 'prepare_data_ribeiro_test']
 
 # Cell
+import ast
+
 import wfdb
 
 import scipy.io
@@ -165,10 +167,16 @@ def prepare_data_cinc(data_path, datasets=["ICBEB2018","ICBEB2018_2","INCART","P
     if(recreate_data is True):
         dx_meta = pd.concat([pd.read_csv(data_path/"dx_mapping_scored.csv"),pd.read_csv(data_path/"dx_mapping_unscored.csv")],sort=True)
         dx_mapping_snomed_abbrev = {a:b for [a,b] in list(dx_meta.apply(lambda row: [row["SNOMED CT Code"],row["Abbreviation"]],axis=1))}
-
+        '''{270492004: 'IAVB',
+             164889003: 'AF',
+             164890007: 'AFL',
+             ……
+             427084000: 'STach',
+             63593006: 'SVPB',
+             17338001: 'VPB',}'''
         metadata = []
         for filename in tqdm(list(data_path.glob('**/*.hea'))):
-            if(not(filename.parts[-2] in datasets)):
+            if(not(filename.parts[-3] in datasets)):
                 continue
             sigbufs, header = wfdb.rdsamp(str(filename)[:-4])
             #print(filename,sigbufs.shape,np.min(sigbufs,axis=0),np.any(np.isnan(sigbufs)))
@@ -197,11 +205,12 @@ def prepare_data_cinc(data_path, datasets=["ICBEB2018","ICBEB2018_2","INCART","P
                     elif(sex=="f"):
                         sex="female"
 
-            metadata.append({"data":Path(filename.stem+".npy"),"label":labels,"sex":sex,"age":age,"dataset":"cinc_"+filename.parts[-2]})
+            metadata.append({"data":Path(filename.stem+".npy"),"label":labels,"sex":sex,"age":age,"dataset":"cinc_"+filename.parts[-3]})
         df =pd.DataFrame(metadata)
+        # print(df)
         lbl_itos = np.unique([item for sublist in list(df.label) for item in sublist])
         lbl_stoi = {s:i for i,s in enumerate(lbl_itos)}
-        df["label"] = df["label"].apply(lambda x: [lbl_stoi[y] for y in x])
+        df["label"] = df["label"].apply(lambda x: [lbl_stoi[y] for y in x])     # 每个样本的标签都是一个列表，里面包含数字[1, 2, 3]
 
         #does not incorporate patient-level split
         df["strat_fold"]=-1
@@ -350,6 +359,68 @@ def prepare_data_ribeiro_test(data_path, denoised=False, target_fs=100, strat_fo
         idxs = np.array(df.index.values)
         for i,split in enumerate(stratified_ids):
             df.loc[idxs[split],"strat_fold"]=i
+
+        #add means and std
+        dataset_add_mean_col(df,data_folder=target_root)
+        dataset_add_std_col(df,data_folder=target_root)
+        dataset_add_length_col(df,data_folder=target_root)
+
+        #save means and stds
+        mean, std = dataset_get_stats(df)
+
+        #save
+        save_dataset(df, lbl_itos, mean, std, target_root)
+    else:
+        df, lbl_itos, mean, std = load_dataset(target_root,df_mapped=False)
+    return df, lbl_itos, mean, std
+
+def prepare_data_acs(data_path, target_fs=100,
+                     strat_folds=10, channels=12, channel_stoi=channel_stoi_default, target_folder=None,
+                     skimage_transform=True, recreate_data=True):
+    '''unzip archives into separate folders with dataset names from above'''
+    target_root = Path(".") if target_folder is None else target_folder
+    target_root.mkdir(parents=True, exist_ok=True)
+    # 假设data_path下有一个acs_database.csv
+    df_acs_database = pd.read_csv(data_path/'ACS_database.csv', dtype=str)
+    df_acs_database.scp_codes = df_acs_database.scp_codes.apply(lambda x: ast.literal_eval(x))
+
+    if(recreate_data is True):
+        # 这里改成遍历acs_database.csv
+        for index, row in tqdm(df_acs_database.iterrows()):
+            filename = row['ecg_id']
+            sigbufs, header = wfdb.rdsamp(str(data_path/'records'/filename))
+            #print(filename,sigbufs.shape,np.min(sigbufs,axis=0),np.any(np.isnan(sigbufs)))
+            if(np.any(np.isnan(sigbufs))):
+                print("Warning:",str(filename),"is corrupt. Skipping.")
+                continue
+            # data是一个二维的numpy数组，里面存放了心电图信号，维度是(time_step, channel)
+            data = resample_data(sigbufs=sigbufs,channel_stoi=channel_stoi,channel_labels=header['sig_name'],fs=header['fs'],target_fs=target_fs,channels=channels,skimage_transform=skimage_transform)
+            assert(target_fs<=header['fs'])
+            np.save(target_root/(filename+".npy"),data)
+            df_acs_database.at[index, 'data'] = Path(filename+".npy")
+
+        # df =pd.DataFrame(metadata)
+        # print(df)
+        df = df_acs_database
+        df['label'] = df.scp_codes.apply(lambda x: [y for y in x.keys()])
+        df['dataset'] = 'acs_database'
+        gender_counts = df['sex'].value_counts()
+        # print(gender_counts)
+
+        lbl_itos = np.unique([item for sublist in list(df.label) for item in sublist])
+        assert len(lbl_itos) == 2       # 检查是否只有两个标签
+        lbl_stoi = {'NORM': 0, "AMI": 1}     # 这里直接硬编码吧
+        # lbl_stoi = {s: i for i, s in enumerate(lbl_itos)}
+        # df['label_txt'] = df['label'].copy()
+        df["label"] = df["label"].apply(lambda x: [lbl_stoi[y] for y in x])     # 每个样本的标签都是一个列表，里面包含数字[1, 2, 3]
+
+        #does not incorporate patient-level split
+        # stratified_ids = stratify(list(df.apply(lambda row: row["label_txt"] + [row["sex"]], axis=1)),
+        #                           lbl_itos.tolist() + ["male", "female"], [1. / strat_folds] * strat_folds)
+        # df["strat_fold"] = -1
+        # idxs = np.array(df.index.values)
+        # for i, split in enumerate(stratified_ids):
+        #     df.loc[idxs[split], "strat_fold"] = i
 
         #add means and std
         dataset_add_mean_col(df,data_folder=target_root)

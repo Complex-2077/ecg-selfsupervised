@@ -57,6 +57,7 @@ def parse_args():
     parser.add_argument("--conv_encoder", action="store_true", default=False)
     parser.add_argument("--base_model", default="xresnet1d50")
     parser.add_argument("--widen", default=1, type=int, help="use wide xresnet1d50")
+    parser.add_argument("--loss_fn", default='binary_entropy', help="loss function for the model")
     args = parser.parse_args()
     return args
 
@@ -135,8 +136,14 @@ def adjust(model, num_classes, hidden=False):
     model.forward = def_forward(model)
 
 
-def configure_optimizer(model, batch_size, head_only=False, discriminative_lr=False, base_model="xresnet1d", optimizer="adam", discriminative_lr_factor=1):
-    loss_fn = F.binary_cross_entropy_with_logits
+def configure_optimizer(model, batch_size, head_only=False, discriminative_lr=False, base_model="xresnet1d",
+                        optimizer="adam", discriminative_lr_factor=1, loss_name='binary_entropy'):
+    if loss_name == 'binary_entropy':
+        loss_fn = F.binary_cross_entropy_with_logits
+    elif loss_name == 'cross_entropy':
+        loss_fn = F.cross_entropy
+    else:
+        raise ("loss " + str(loss_name) + " unknown")
     if base_model == "xresnet1d":
         wd = 1e-1
         if head_only:
@@ -212,7 +219,7 @@ def configure_optimizer(model, batch_size, head_only=False, discriminative_lr=Fa
         raise("model unknown")
     return loss_fn, optimizer
 
-
+    # linear_eval = False, num_classes = 71, use_pretrained = True, hidden=False, method=simclr,
 def load_model(linear_evaluation, num_classes, use_pretrained, discriminative_lr=False, hidden=False, conv_encoder=False, bn_head=False, ps_head=0.5, location="./checkpoints/moco_baselinewonder200.ckpt", method="simclr", base_model="xresnet1d50", out_dim=16, widen=1):
     discriminative_lr_factor = 1
     if use_pretrained:
@@ -462,6 +469,8 @@ def eval_model(model, valid_loader, cpc=False):
 
 
 def get_dataset(batch_size, num_workers, target_folder, apply_noise=False, percentage=1.0, folds=8, t_params=None, test=False, normalize=False):
+    assert isinstance(target_folder, list) and len(target_folder) == 1
+    target_folder = target_folder[0]
     if apply_noise:
         transformations = ["BaselineWander",
                            "PowerlineNoise", "EMNoise", "BaselineShift"]
@@ -484,6 +493,12 @@ def get_dataset(batch_size, num_workers, target_folder, apply_noise=False, perce
 
 
 if __name__ == "__main__":
+    '''
+    python eval.py --method simclr 
+    --model_file "experiment_logs/Wed Dec  2 17:06:54 2020\_simclr\_696\_RRC TO/checkpoints/model.ckpt" 
+    --batch_size 128 --use_pretrained --f_epochs 50 --dataset ./data/ptb_xl
+    '''
+    # --dataset 后面跟着的就是get_dataset函数中的target_folder
     args = parse_args()
     dataset, train_loader, _ = get_dataset(
         args.batch_size, args.num_workers, args.dataset, folds=args.folds, test=args.test, normalize=args.normalize)
@@ -496,7 +511,7 @@ if __name__ == "__main__":
     lbl_itos = dataset.lbl_itos
     tag = "f=" + str(args.folds) + "_" + args.tag
     tag = tag if args.use_pretrained else "ran_" + tag
-    tag = "eval_" + tag if args.eval_only else tag
+    tag = "eval_" + tag if args.eval_only else tag      # tag = "f=8_"
     model_tag = "finetuned" if args.load_finetuned else "ckpt"
     if args.test_noised:
         t_params_by_level = {
@@ -530,10 +545,11 @@ if __name__ == "__main__":
             args.model_file), "n=" + str(args.noise_level) + "_"+tag + "res_fin.pkl")
 
     model = load_model(
-        args.linear_evaluation, 71, args.use_pretrained or args.load_finetuned, hidden=args.hidden,
-        location=args.model_file, discriminative_lr=args.discriminative_lr, method=args.method)
+        args.linear_evaluation, len(lbl_itos), args.use_pretrained or args.load_finetuned, hidden=args.hidden, # args.hidden=False
+        location=args.model_file, discriminative_lr=args.discriminative_lr, method=args.method) # dis_lr = False, method = simclr
     loss_fn, optimizer = configure_optimizer(
-        model, args.batch_size, head_only=True, discriminative_lr=args.discriminative_lr, discriminative_lr_factor=0.1 if args.use_pretrained and args.discriminative_lr else 1)
+        model, args.batch_size, head_only=True, discriminative_lr=args.discriminative_lr,
+        discriminative_lr_factor=0.1 if args.use_pretrained and args.discriminative_lr else 1, loss_name=args.loss_fn)
     if not args.eval_only:
         print("train model...")
         if not isdir(save_model_at):
@@ -549,10 +565,11 @@ if __name__ == "__main__":
         if args.f_epochs != 0:
             if args.l_epochs != 0:
                 model = load_model(
-                    False, 71, True, hidden=args.hidden,
+                    False, len(lbl_itos), True, hidden=args.hidden,
                     location=join(save_model_at, "finetuned.pt"), discriminative_lr=args.discriminative_lr, method=args.method)
             loss_fn, optimizer = configure_optimizer(
-                model, args.batch_size, head_only=False, discriminative_lr=args.discriminative_lr, discriminative_lr_factor=0.1 if args.use_pretrained and args.discriminative_lr else 1)
+                model, args.batch_size, head_only=False, discriminative_lr=args.discriminative_lr,
+                discriminative_lr_factor=0.1 if args.use_pretrained and args.discriminative_lr else 1, loss_name=args.loss_fn)
             l2, m2, bm, bm_agg, tm, tm_agg, ckpt_epoch_fin, preds = train_model(model, train_loader, valid_loader, test_loader, args.f_epochs, loss_fn,
                                                                                 optimizer, head_only=False, linear_evaluation=False, lr_schedule=args.lr_schedule, save_model_at=join(save_model_at, "finetuned.pt"),
                                                                                 val_idmap=val_idmap, test_idmap=test_idmap, lbl_itos=lbl_itos, cpc=(args.method == "cpc"))

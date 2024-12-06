@@ -69,7 +69,8 @@ def transformations_from_strings(transformations, t_params):
 
 
 class SimCLRDataSetWrapper(object):
-
+    # batch_size = 4096, num_workders = 0, valid_size=0.05, input_shape=(12, 333)
+    # target_folders = ["./data/cinc_fs100", "./data/zheng_fs100", "./data/ribeiro_fs100"], recreate_data_ptb_xl=None
     def __init__(self, batch_size, num_workers, valid_size, input_shape, s, data_folder, target_folders, target_fs, recreate_data_ptb_xl,
                  mode="pretraining", transformations=None, t_params=None, ptb_xl_label="label_diag_superclass", filter_cinc=False, 
                  percentage=1.0, swav=False, nmb_crops=7, folds=8, test=False):
@@ -102,6 +103,7 @@ class SimCLRDataSetWrapper(object):
         else:
             raise("mode unkown")
 
+    # 如果是linear_evaluation模式，则只返回一个经过transforms的数据集，否则返回多个经过transforms的数据集
     def get_data_loaders(self):
         data_augment = self._get_simclr_pipeline_transform()
 
@@ -118,7 +120,7 @@ class SimCLRDataSetWrapper(object):
             self.val_ds_idmap = val_ds.get_id_mapping()
         else:
             
-            wrapper_transform = SwAVDataTransform(data_augment, num_crops=self.nmb_crops) if self.swav else SimCLRDataTransform(data_augment)
+            wrapper_transform = SwAVDataTransform(data_augment, num_crops=self.nmb_crops) if self.swav else SimCLRDataTransform(data_augment)   # data_augment是将所有变换复合在了一起的一个对象, 返回两个经过随机变换的样本
             datasets = [self._get_datasets(target_folder, transforms=wrapper_transform) for target_folder in self.target_folders]
             train_datasets, valid_datasets = list(zip(*datasets))
 
@@ -132,6 +134,8 @@ class SimCLRDataSetWrapper(object):
         self.val_ds_size = len(val_ds)
         return train_loader, valid_loader
 
+    # 这个方法，相当于就是将df_memap分成了train, val和test，接着只返回训练集和验证集。但是，如果是linear_evaluation模式的话，
+    # 会返回切块的验证集，并且返回真实的标签。如果是pretrain模式的话，那么不会返回真实的标签
     def _get_datasets(self, target_folder, transforms=None):
         logger.info("get dataset from " + str(target_folder))
         # Dataset parameters
@@ -140,7 +144,7 @@ class SimCLRDataSetWrapper(object):
         # Training setting
         input_size = 250  # originally 600
         chunkify_train = False
-        chunkify_valid = self.mode != "pretraining"
+        chunkify_valid = self.mode != "pretraining"     # 如果是预训练的话就不进行数据切块
         chunk_length_train = input_size  # target_fs*6
         chunk_length_valid = input_size
         min_chunk_length = input_size  # chunk_length
@@ -149,7 +153,7 @@ class SimCLRDataSetWrapper(object):
 
         copies_valid = 0  # >0 should only be used with chunkify_valid=False
         if self.test:
-            valid_fold=10
+            valid_fold=10       # 这是因为只返回valid_ds，所以在这里验证集要被置为10
             test_fold=9
         else:
             valid_fold=9
@@ -215,7 +219,7 @@ class SimCLRDataSetWrapper(object):
         
             df_train = df_mapped[(df_mapped.strat_fold != test_fold) & (
                 df_mapped.strat_fold != valid_fold) & (df_mapped.label.apply(lambda x: np.sum(x) > 0))]
-        else:
+        else:   # as for linear_evaluation mode
             assert(self.folds < 9)
             df_train = df_mapped[(df_mapped.strat_fold.apply(lambda x: x in train_folds[range(self.folds)]) & (df_mapped.label.apply(lambda x: np.sum(x) > 0)))]
         

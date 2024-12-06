@@ -11,6 +11,7 @@ from sklearn.metrics import roc_auc_score, auc
 from scipy.interpolate import interp1d
 
 from sklearn.metrics import roc_curve, precision_recall_curve
+from sklearn.metrics import accuracy_score, recall_score, precision_score, f1_score, confusion_matrix
 from sklearn.utils import resample
 
 from tqdm import tqdm
@@ -175,7 +176,7 @@ def eval_scores(y_true,y_pred,classes=None,num_thresholds=100,full_output=False,
 
     label-centric: micro,macro,individual AUC and Average Precision
     '''
-    results = {}
+    results = compute_metrics(y_true, y_pred, classes)
 
     # thresholds = np.arange(0.00, 1.01, 1./num_thresholds, float)
     # if(parallel is False):
@@ -276,3 +277,71 @@ def eval_scores_bootstrap(y_true, y_pred,classes=None, n_iterations = 10000, alp
     label_APR_high = label_APR_point + np.percentile(label_APR_diff,p,axis=0)
 
     return {"Fmax":[Fmax_low,Fmax_point,Fmax_high], "sample_AUC":[sample_AUC_low,sample_AUC_point,sample_AUC_high], "sample_APR":[sample_APR_low,sample_APR_point,sample_APR_high], "label_AUC":{k:[v1,v2,v3] for k,v1,v2,v3 in zip(label_AUC_keys,label_AUC_low,label_AUC_point,label_AUC_high)}, "label_APR":{k:[v1,v2,v3] for k,v1,v2,v3 in zip(label_AUC_keys,label_APR_low,label_APR_point,label_APR_high)}}
+
+# 编写一个函数，传入y_true, y_pred, 先对每个类别计算出一个最佳的threshold，然后将y_pred二值化，
+# 最后返回每个类别的acc, recall, specificity, precision, NPV, F1-分数
+def compute_metrics(y_true, y_pred, classes):
+    """
+    计算每个类别的最佳阈值并返回多个分类指标。
+
+    参数:
+    y_true -- 真实标签，形状为 (n_samples, n_classes)
+    y_pred -- 预测概率，形状为 (n_samples, n_classes)
+
+    返回:
+    metrics -- 包含每个类别的各项指标的字典
+    """
+    # n_classes = y_true.shape[1]
+    metrics = {}
+
+    for i,c in enumerate(classes):
+        # 获取当前类别的真实值和预测概率
+        y_true_class = y_true[:, i]
+        y_pred_class = y_pred[:, i]
+
+        # 确定最佳阈值
+        best_threshold = find_optimal_cutoff_threshold(y_true_class, y_pred_class)
+        # for threshold in np.linspace(0, 1, 101):  # 从0到1，以0.01为间隔
+        #     y_pred_binary = (y_pred_class >= threshold).astype(int)
+        #     f1 = f1_score(y_true_class, y_pred_binary)
+        #     if f1 > best_f1:
+        #         best_f1 = f1
+        #         best_threshold = threshold
+
+        # 使用最佳阈值进行二值化
+        y_pred_binary = (y_pred_class >= best_threshold).astype(int)
+
+        # 计算混淆矩阵中的各项
+        tn, fp, fn, tp = confusion_matrix(y_true_class, y_pred_binary).ravel()
+
+        # 计算各项指标
+        accuracy = (tp + tn) / (tp + tn + fp + fn)
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        npv = tn / (tn + fn) if (tn + fn) > 0 else 0
+        f1 = f1_score(y_true_class, y_pred_binary)
+        auroc = roc_auc_score(y_true_class, y_pred_class)
+
+        # 存储结果
+        metrics[c] = {
+            'threshold': best_threshold,
+            'accuracy': accuracy,
+            'recall': recall,
+            'specificity': specificity,
+            'precision': precision,
+            'NPV': npv,
+            'F1-score': f1,
+            'AUROC': auroc
+        }
+
+    return metrics
+
+def find_optimal_cutoff_threshold(target, predicted):
+    """
+    Find the optimal probability cutoff point for a classification model related to event rate
+    """
+    fpr, tpr, threshold = roc_curve(target, predicted)
+    optimal_idx = np.argmax(tpr - fpr)
+    optimal_threshold = threshold[optimal_idx]
+    return optimal_threshold

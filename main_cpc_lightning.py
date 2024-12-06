@@ -13,7 +13,10 @@ import argparse
 from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.callbacks import ModelCheckpoint, LearningRateMonitor
 import copy
-
+'''
+main_cpc_lightning.py --data ./data/cinc --data ./data/zheng --data ./data/ribeiro --normalize --epochs 1000 
+--output-path=./runs/cpc/all --lr 0.0001 --batch-size 32 --input-size 1000 --fc-encoder --negatives-from-same-seq-only
+'''
 #################
 #specific
 from clinical_ts.timeseries_utils import *
@@ -64,6 +67,7 @@ class LightningCPC(pl.LightningModule):
         
         self.hparams = hparams
         self.lr = self.hparams.lr
+        self.best_auroc = 0
         
         #these coincide with the adapted wav2vec2 params
         if(self.hparams.fc_encoder):
@@ -76,26 +80,42 @@ class LightningCPC(pl.LightningModule):
             features = [512]*4 #wav2vec2 [512]*6 original cpc [512]*5
         
         if(self.hparams.finetune):
-            self.criterion = F.cross_entropy if self.hparams.finetune_dataset == "thew" else F.binary_cross_entropy_with_logits
+            self.criterion = F.cross_entropy if self.hparams.finetune_dataset == "thew" or self.hparams.finetune_dataset == "acs_database" else F.binary_cross_entropy_with_logits
             if(self.hparams.finetune_dataset == "thew"):
                 num_classes = 5
             elif(self.hparams.finetune_dataset == "ptbxl_super"):
                 num_classes = 5
-            if(self.hparams.finetune_dataset == "ptbxl_all"):
+            elif(self.hparams.finetune_dataset == "ptbxl_all"):
                 num_classes = 71
+            elif(self.hparams.finetune_dataset == "acs_database"):
+                num_classes = 2
+            elif(self.hparams.finetune_dataset == "acs_database_multilabel"):
+                num_classes = 5
         else:
             num_classes = None
-
-        self.model_cpc = CPCModel(input_channels=self.hparams.input_channels, strides=strides,kss=kss,features=features,n_hidden=self.hparams.n_hidden,n_layers=self.hparams.n_layers,mlp=self.hparams.mlp,lstm=not(self.hparams.gru),bias_proj=self.hparams.bias,num_classes=num_classes,skip_encoder=self.hparams.skip_encoder,bn_encoder=not(self.hparams.no_bn_encoder),lin_ftrs_head=[] if self.hparams.linear_eval else eval(self.hparams.lin_ftrs_head),ps_head=0 if self.hparams.linear_eval else self.hparams.dropout_head,bn_head=False if self.hparams.linear_eval else not(self.hparams.no_bn_head))
+        # input_channels = 12, strides = [1,1,1,1], kss = [1,1,1,1], features = [512, 512, 512, 512],
+        # n_hidden = 512, n_layers = 2, mlp = False, lstm = True, bias_proj = False, num_classes = None,
+        # skip_encoder = False, bn_encoder = False, lin_ftrs_head = [512], ps_head = 0.5, bn_head = True
+        self.model_cpc = CPCModel(input_channels=self.hparams.input_channels, strides=strides,kss=kss,features=features,
+                                  n_hidden=self.hparams.n_hidden,n_layers=self.hparams.n_layers,mlp=self.hparams.mlp,
+                                  lstm=not(self.hparams.gru),bias_proj=self.hparams.bias,num_classes=num_classes,
+                                  skip_encoder=self.hparams.skip_encoder,bn_encoder=not(self.hparams.no_bn_encoder),
+                                  lin_ftrs_head=[] if self.hparams.linear_eval else eval(self.hparams.lin_ftrs_head),   # linear_eval = False
+                                  ps_head=0 if self.hparams.linear_eval else self.hparams.dropout_head,
+                                  bn_head=False if self.hparams.linear_eval else not(self.hparams.no_bn_head))
         
         target_fs=100
         if(not(self.hparams.finetune)):
-            print("CPC pretraining:\ndownsampling factor:",self.model_cpc.encoder_downsampling_factor,"\nchunk length(s)",self.model_cpc.encoder_downsampling_factor/target_fs,"\npixels predicted ahead:",self.model_cpc.encoder_downsampling_factor*self.hparams.steps_predicted,"\nseconds predicted ahead:",self.model_cpc.encoder_downsampling_factor*self.hparams.steps_predicted/target_fs,"\nRNN input size:",self.hparams.input_size//self.model_cpc.encoder_downsampling_factor)
+            print("CPC pretraining:\ndownsampling factor:",self.model_cpc.encoder_downsampling_factor,
+                  "\nchunk length(s)",self.model_cpc.encoder_downsampling_factor/target_fs,
+                  "\npixels predicted ahead:",self.model_cpc.encoder_downsampling_factor*self.hparams.steps_predicted,
+                  "\nseconds predicted ahead:",self.model_cpc.encoder_downsampling_factor*self.hparams.steps_predicted/target_fs,   # 12毫秒
+                  "\nRNN input size:",self.hparams.input_size//self.model_cpc.encoder_downsampling_factor)
 
     def forward(self, x):
         return self.model_cpc(x)
         
-    def _step(self,data_batch, batch_idx, train):       
+    def _step(self,data_batch, batch_idx, train):       # data_batch: (sample, label)
         if(self.hparams.finetune):
             preds = self.forward(data_batch[0])
             loss = self.criterion(preds,data_batch[1])
@@ -114,27 +134,68 @@ class LightningCPC(pl.LightningModule):
         
     def validation_step(self, val_batch, batch_idx, dataloader_idx=0):
         return self._step(val_batch,batch_idx,False)
-        
+
     def validation_epoch_end(self, outputs_all):
         if(self.hparams.finetune):
             for dataloader_idx,outputs in enumerate(outputs_all): #multiple val dataloaders
                 preds_all = torch.cat([x['preds'] for x in outputs])
                 targs_all = torch.cat([x['targs'] for x in outputs])
-                if(self.hparams.finetune_dataset=="thew"):
+                if(self.hparams.finetune_dataset=="thew" or self.hparams.finetune_dataset=='acs_database'):
                     preds_all = F.softmax(preds_all,dim=-1)
-                    targs_all = torch.eye(len(self.lbl_itos))[targs_all].to(preds.device) 
+                    # i_matrix = torch.eye(len(self.lbl_itos)).to(targs_all.device)
+                    # print(preds_all.shape)
+                    # print(targs_all)
+                    # print(targs_all.shape)
+                    # targs_all = i_matrix[targs_all]
                 else:
                     preds_all = torch.sigmoid(preds_all)
+                # print(preds_all.shape)
+                # print(targs_all)
+                # print(targs_all.shape)
                 preds_all = preds_all.cpu().numpy()
                 targs_all = targs_all.cpu().numpy()
                 #instance level score
                 res = eval_scores(targs_all,preds_all,classes=self.lbl_itos)
-                
-                idmap = self.val_dataset.get_id_mapping()
+
+                if dataloader_idx == 0:
+                    idmap = self.val_dataset.get_id_mapping()   # idmap = [0,0,0,0,1,1,1,2,2...]
+                elif dataloader_idx == 1:
+                    idmap = self.test_dataset.get_id_mapping()
+                else:
+                    raise ("Invalid dataloader_idx! Please check your code.")
                 preds_all_agg,targs_all_agg = aggregate_predictions(preds_all,targs_all,idmap,aggregate_fn=np.mean)
                 res_agg = eval_scores(targs_all_agg,preds_all_agg,classes=self.lbl_itos)
                 self.log_dict({"macro_auc_agg"+str(dataloader_idx):res_agg["label_AUC"]["macro"], "macro_auc_noagg"+str(dataloader_idx):res["label_AUC"]["macro"]})
                 print("epoch",self.current_epoch,"macro_auc_agg"+str(dataloader_idx)+":",res_agg["label_AUC"]["macro"],"macro_auc_noagg"+str(dataloader_idx)+":",res["label_AUC"]["macro"])
+                if dataloader_idx == 1:
+                    metrics_to_save = {
+                        'threshold': [],
+                        'accuracy': [],
+                        'recall': [],
+                        'specificity': [],
+                        'precision': [],
+                        'NPV': [],
+                        'F1-score': [],
+                        'AUROC': [],
+                        'class': []
+                    }
+                    # 逐个打印类别的内部指标
+                    print(f'-----------轮次：{self.current_epoch}, 开始打印指标----------')
+                    for i, c in enumerate(self.lbl_itos):
+                        metrics_dict = res_agg[c]
+                        line = f"类别{c}"
+                        metrics_to_save['class'].append(c)
+                        for key, value in metrics_dict.items():
+                            item = f'{key}: {value}\t'
+                            line += item
+                            metrics_to_save[key].append(value)
+                        print(line)
+                    print(f'-----------轮次：{self.current_epoch}, 结束打印指标----------')
+                    if res_agg["label_AUC"]["macro"] > self.best_auroc:
+                        self.best_auroc = res_agg["label_AUC"]["macro"]
+                        # 保存指标到文件中
+                        df = pd.DataFrame(metrics_to_save)
+                        df.to_csv(self.hparams.output_path+'/best_metrics.csv')
 
 
     def on_fit_start(self):
@@ -167,8 +228,8 @@ class LightningCPC(pl.LightningModule):
             
             df_mapped, lbl_itos,  mean, std = load_dataset(target_folder)
             # always use PTB-XL stats
-            mean = np.array([-0.00184586, -0.00130277,  0.00017031, -0.00091313, -0.00148835,  -0.00174687, -0.00077071, -0.00207407,  0.00054329,  0.00155546,  -0.00114379, -0.00035649])
-            std = np.array([0.16401004, 0.1647168 , 0.23374124, 0.33767231, 0.33362807,  0.30583013, 0.2731171 , 0.27554379, 0.17128962, 0.14030828,   0.14606956, 0.14656108])
+            # mean = np.array([-0.00184586, -0.00130277,  0.00017031, -0.00091313, -0.00148835,  -0.00174687, -0.00077071, -0.00207407,  0.00054329,  0.00155546,  -0.00114379, -0.00035649])
+            # std = np.array([0.16401004, 0.1647168 , 0.23374124, 0.33767231, 0.33362807,  0.30583013, 0.2731171 , 0.27554379, 0.17128962, 0.14030828,   0.14606956, 0.14656108])
             
             #specific for PTB-XL
             if(self.hparams.finetune and self.hparams.finetune_dataset.startswith("ptbxl")):
@@ -186,8 +247,27 @@ class LightningCPC(pl.LightningModule):
                     return res
                     
                 df_mapped["label"]= df_mapped[ptb_xl_label+"_filtered_numeric"].apply(lambda x: multihot_encode(x,len(lbl_itos)))
-                    
-            
+            elif self.hparams.finetune and self.hparams.finetune_dataset == "acs_database":
+                def onehot_encode(x, num_classes):
+                    assert len(x) == 1
+                    res = np.zeros(num_classes,dtype=np.float32)
+                    res[x[0]] = 1
+                    return res
+                df_mapped["label"] = df_mapped['label'].apply(
+                    lambda x: onehot_encode(x, len(lbl_itos)))
+                df_mapped['strat_fold'] = df_mapped['strat_fold'].astype(int)
+            elif self.hparams.finetune and self.hparams.finetune_dataset == "acs_database_multilabel":
+                def multihot_encode(x, num_classes):
+                    res = np.zeros(num_classes, dtype=np.float32)
+                    for y in x:
+                        res[y] = 1
+                    return res
+                df_mapped["label"] = df_mapped['label'].apply(
+                    lambda x: multihot_encode(x, len(lbl_itos)))
+                print(lbl_itos)
+                # 把df中的strat_fold列转成int
+                df_mapped['strat_fold'] = df_mapped['strat_fold'].astype(int)
+
             self.lbl_itos = lbl_itos
             tfms_ptb_xl_cpc = ToTensor() if self.hparams.normalize is False else transforms.Compose([Normalize(mean,std),ToTensor()])
             
